@@ -1,0 +1,5 @@
+# Artefatos gerados ficam só localmente — o repo carrega código e material de estudo
+artefatos/
+*.zip
+*.gz
+__pycache__/
