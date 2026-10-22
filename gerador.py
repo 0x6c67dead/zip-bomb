@@ -26,33 +26,35 @@ import io
 import os
 import zipfile
 
-CHUNK = 1 << 20  # 1 MiB: tudo em streaming, o conteúdo inteiro nunca vai pra RAM
+TAMANHO_BLOCO = 1 << 20  # 1 MiB por bloco: tudo em streaming, o conteúdo inteiro nunca vai pra RAM
 
 
-def fmt(n: float) -> str:
+def formatar_tamanho(valor: float) -> str:
+    """Formata uma quantidade de bytes em unidades legíveis (KiB, MiB, ...)."""
     for unidade in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if n < 1024:
-            return f"{n:.1f} {unidade}"
-        n /= 1024
-    return f"{n:.1f} PiB"
+        if valor < 1024:
+            return f"{valor:.1f} {unidade}"
+        valor /= 1024
+    return f"{valor:.1f} PiB"
 
 
 def gerar_simples(destino: str, tamanho: int, aleatorio: bool = False) -> None:
     """Comprime `tamanho` bytes em streaming (zeros ou aleatório)."""
-    with gzip.open(destino, "wb", compresslevel=9) as f:
-        escritos = 0
-        while escritos < tamanho:
-            f.write(os.urandom(CHUNK) if aleatorio else b"\0" * CHUNK)
-            escritos += CHUNK
+    with gzip.open(destino, "wb", compresslevel=9) as arquivo_gzip:
+        bytes_escritos = 0
+        while bytes_escritos < tamanho:
+            bloco = os.urandom(TAMANHO_BLOCO) if aleatorio else b"\0" * TAMANHO_BLOCO
+            arquivo_gzip.write(bloco)
+            bytes_escritos += TAMANHO_BLOCO
 
-    comprimido = os.path.getsize(destino)
+    tamanho_comprimido = os.path.getsize(destino)
     print(f"[{destino}]")
-    print(f"  descomprimido: {fmt(tamanho)}")
-    print(f"  comprimido:    {fmt(comprimido)}")
-    print(f"  razão:         {tamanho / comprimido:.1f}:1")
+    print(f"  descomprimido: {formatar_tamanho(tamanho)}")
+    print(f"  comprimido:    {formatar_tamanho(tamanho_comprimido)}")
+    print(f"  razão:         {tamanho / tamanho_comprimido:.1f}:1")
 
 
-def gerar_aninhada(destino: str, fundo: int, niveis: int, copias: int) -> None:
+def gerar_aninhada(destino: str, tamanho_fundo: int, niveis: int, copias: int) -> None:
     """Zip com `copias` cópias do zip anterior, `niveis` vezes.
 
     Cada nível multiplica por `copias` o total que seria materializado
@@ -61,72 +63,81 @@ def gerar_aninhada(destino: str, fundo: int, niveis: int, copias: int) -> None:
     estrutural, não da compressão entre cópias.
     """
     # camada mais interna: um zip com um único arquivo redundante
-    interno = io.BytesIO()
-    with zipfile.ZipFile(interno, "w", zipfile.ZIP_DEFLATED) as z:
-        with z.open("zeros.bin", "w") as entrada:
-            escritos = 0
-            while escritos < fundo:
-                entrada.write(b"\0" * CHUNK)
-                escritos += CHUNK
+    zip_interno = io.BytesIO()
+    with zipfile.ZipFile(zip_interno, "w", zipfile.ZIP_DEFLATED) as arquivo_zip:
+        with arquivo_zip.open("zeros.bin", "w") as entrada:
+            bytes_escritos = 0
+            while bytes_escritos < tamanho_fundo:
+                entrada.write(b"\0" * TAMANHO_BLOCO)
+                bytes_escritos += TAMANHO_BLOCO
 
-    dados = interno.getvalue()
+    zip_atual = zip_interno.getvalue()
     for nivel in range(niveis):
-        novo = io.BytesIO()
-        with zipfile.ZipFile(novo, "w", zipfile.ZIP_DEFLATED) as z:
-            for i in range(copias):
-                z.writestr(f"nivel{nivel + 1}_copia{i:02d}.zip", dados)
-        dados = novo.getvalue()
+        zip_novo = io.BytesIO()
+        with zipfile.ZipFile(zip_novo, "w", zipfile.ZIP_DEFLATED) as arquivo_zip:
+            for indice_copia in range(copias):
+                arquivo_zip.writestr(f"nivel{nivel + 1}_copia{indice_copia:02d}.zip", zip_atual)
+        zip_atual = zip_novo.getvalue()
 
-    with open(destino, "wb") as f:
-        f.write(dados)
+    with open(destino, "wb") as arquivo:
+        arquivo.write(zip_atual)
 
-    total = fundo * copias**niveis
+    total_descomprimido = tamanho_fundo * copias**niveis
     print(f"[{destino}]")
-    print(f"  estrutura:     fundo de {fmt(fundo)} x {copias}^{niveis} cópias")
-    print(f"  arquivo final: {fmt(len(dados))}")
-    print(f"  se extraído:   {fmt(total)}")
-    print(f"  razão:         {total / len(dados):.1f}:1")
+    print(f"  estrutura:     fundo de {formatar_tamanho(tamanho_fundo)} x {copias}^{niveis} cópias")
+    print(f"  arquivo final: {formatar_tamanho(len(zip_atual))}")
+    print(f"  se extraído:   {formatar_tamanho(total_descomprimido)}")
+    print(f"  razão:         {total_descomprimido / len(zip_atual):.1f}:1")
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Gerador didático de zip bombs")
-    sub = ap.add_subparsers(dest="tipo", required=True)
+    parser = argparse.ArgumentParser(description="Gerador didático de zip bombs")
+    subcomandos = parser.add_subparsers(dest="tipo", required=True)
 
-    ps = sub.add_parser("simples", help="arquivo redundante comprimido uma vez (~1032:1)")
-    ps.add_argument("--tamanho-mib", type=int, default=1024)
+    parser_simples = subcomandos.add_parser(
+        "simples", help="arquivo redundante comprimido uma vez (~1032:1)"
+    )
+    parser_simples.add_argument("--tamanho-mib", type=int, default=1024)
 
-    pa = sub.add_parser("aninhada", help="zip com k cópias em n níveis (multiplicação)")
-    pa.add_argument("--fundo-mib", type=int, default=100)
-    pa.add_argument("--niveis", type=int, default=3)
-    pa.add_argument("--copias", type=int, default=4)
+    parser_aninhada = subcomandos.add_parser(
+        "aninhada", help="zip com k cópias em n níveis (multiplicação)"
+    )
+    parser_aninhada.add_argument("--fundo-mib", type=int, default=100)
+    parser_aninhada.add_argument("--niveis", type=int, default=3)
+    parser_aninhada.add_argument("--copias", type=int, default=4)
 
-    pc = sub.add_parser("controle", help="bytes aleatórios: sem redundância não há bomba")
-    pc.add_argument("--tamanho-mib", type=int, default=64)
+    parser_controle = subcomandos.add_parser(
+        "controle", help="bytes aleatórios: sem redundância não há bomba"
+    )
+    parser_controle.add_argument("--tamanho-mib", type=int, default=64)
 
-    for p in (ps, pa, pc):
-        p.add_argument(
+    for subparser in (parser_simples, parser_aninhada, parser_controle):
+        subparser.add_argument(
             "--destino",
             default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "artefatos"),
             help="diretório de saída (default: artefatos/ ao lado do script)",
         )
 
-    args = ap.parse_args()
-    os.makedirs(args.destino, exist_ok=True)
+    argumentos = parser.parse_args()
+    os.makedirs(argumentos.destino, exist_ok=True)
 
-    if args.tipo == "simples":
-        gerar_simples(os.path.join(args.destino, "bomba_simples.gz"), args.tamanho_mib << 20)
-    elif args.tipo == "controle":
+    if argumentos.tipo == "simples":
         gerar_simples(
-            os.path.join(args.destino, "controle_aleatorio.gz"),
-            args.tamanho_mib << 20,
+            os.path.join(argumentos.destino, "bomba_simples.gz"),
+            argumentos.tamanho_mib << 20,
+        )
+    elif argumentos.tipo == "controle":
+        gerar_simples(
+            os.path.join(argumentos.destino, "controle_aleatorio.gz"),
+            argumentos.tamanho_mib << 20,
             aleatorio=True,
         )
     else:
         gerar_aninhada(
-            os.path.join(args.destino, "bomba_aninhada.zip"),
-            args.fundo_mib << 20,
-            args.niveis,
-            args.copias,
+            os.path.join(argumentos.destino, "bomba_aninhada.zip"),
+            argumentos.fundo_mib << 20,
+            argumentos.niveis,
+            argumentos.copias,
         )
 
 
